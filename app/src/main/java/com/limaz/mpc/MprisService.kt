@@ -11,6 +11,7 @@ import android.graphics.Bitmap
 import android.media.AudioDeviceCallback
 import android.media.AudioDeviceInfo
 import android.media.AudioManager
+import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
@@ -22,13 +23,14 @@ import android.support.v4.media.session.PlaybackStateCompat
 import android.util.Log
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
+import androidx.core.graphics.drawable.toBitmap
 import androidx.media.VolumeProviderCompat
 import androidx.media.session.MediaButtonReceiver
 import java.util.concurrent.Callable
 import java.util.concurrent.Executors
+import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.atomic.AtomicInteger
-import androidx.core.content.ContextCompat
-import androidx.core.graphics.drawable.toBitmap
 
 /** Foreground media service. Runs only while the quick settings tile is on. */
 class MprisService : Service() {
@@ -36,16 +38,17 @@ class MprisService : Service() {
     companion object {
         private const val TAG = "MprisService"
         private const val CHANNEL_ID = "playback"
-        private const val NOTIF_ID = 1
         private const val IDLE_CHANNEL_ID = "idle"
+        private const val NOTIF_ID = 1
         private const val NOTIF_IDLE_ID = 2
 
         const val ACTION_REPEAT = "com.limaz.mpc.ACTION_REPEAT"
         const val ACTION_RANDOM = "com.limaz.mpc.ACTION_RANDOM"
 
+        private val CONTROL_ACTIONS = setOf(Intent.ACTION_MEDIA_BUTTON, ACTION_REPEAT, ACTION_RANDOM)
         private val REFRESH_EVENTS = setOf("player", "playlist", "mixer", "options")
 
-        private val ACTIONS: Long =
+        private const val ACTIONS: Long =
             PlaybackStateCompat.ACTION_PLAY or PlaybackStateCompat.ACTION_PAUSE or
                     PlaybackStateCompat.ACTION_PLAY_PAUSE or PlaybackStateCompat.ACTION_STOP or
                     PlaybackStateCompat.ACTION_SKIP_TO_NEXT or PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS or
@@ -57,6 +60,9 @@ class MprisService : Service() {
     private lateinit var audioManager: AudioManager
     private lateinit var cmdClient: MpdClient
     private lateinit var idleClient: MpdClient
+    private var coverClient: MpdArt? = null
+    private var artStore: ArtStore? = null
+    private var preloader: ArtPreloader? = null
     private var foregroundId = 0
 
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -73,10 +79,16 @@ class MprisService : Service() {
     @Volatile private var shadowVolume = -1
     private val pendingVol = AtomicInteger(0)
 
+    // Cover state. Only touched inside refresh(), which is synchronized.
     private var lastArtDir: String? = null
     private var lastArt: Bitmap? = null
-    private var artStore: ArtStore? = null
-    private var preloader: ArtPreloader? = null
+
+    // Last values pushed to the session and the notification. Only touched on the main thread.
+    private var metaKeyShown: String? = null
+    private var metaCoverShown: Bitmap? = null
+    private var notifKeyShown: String? = null
+    private var notifCoverShown: Bitmap? = null
+
     private var nowTitle = ""
     private var nowArtist = ""
     private var nowArt: Bitmap? = null
@@ -101,22 +113,23 @@ class MprisService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        // Only becomes foreground once. Media button intents must not swap the notification.
+        // Must become foreground right away. Android kills a service started with
+        // startForegroundService that does not call startForeground within 5 seconds.
         if (foregroundId == 0) showForeground(NOTIF_IDLE_ID, buildIdleNotification())
 
-        when (intent?.action) {
-            Intent.ACTION_MEDIA_BUTTON -> {
-                MediaButtonReceiver.handleIntent(session, intent)
-                return START_NOT_STICKY
+        val action = intent?.action
+        if (intent != null && action != null && action in CONTROL_ACTIONS) {
+            if (running) {
+                when (action) {
+                    Intent.ACTION_MEDIA_BUTTON -> MediaButtonReceiver.handleIntent(session, intent)
+                    ACTION_REPEAT -> cycleRepeat()
+                    ACTION_RANDOM -> toggleRandom()
+                }
+            } else if (!starting) {
+                // A button press while the service is off. Nothing to control, so stop again.
+                stopNow("control while stopped")
             }
-            ACTION_REPEAT -> {
-                cycleRepeat()
-                return START_NOT_STICKY
-            }
-            ACTION_RANDOM -> {
-                toggleRandom()
-                return START_NOT_STICKY
-            }
+            return START_NOT_STICKY
         }
 
         if (running || starting) return START_NOT_STICKY
@@ -137,8 +150,10 @@ class MprisService : Service() {
     private fun startUp() {
         val store = ArtStore(this, config.artMaxSize)
         artStore = store
+        val cover = MpdArt(config.mpd)
+        coverClient = cover
         if (config.albumArt && config.artPreload != "off") {
-            preloader = ArtPreloader(store, config.mpd)
+            preloader = ArtPreloader(store, cover)
         }
 
         cmdClient = newClient()
@@ -146,19 +161,28 @@ class MprisService : Service() {
         try {
             cmdClient.connect()
             idleClient.connect()
-            running = true
-            AppState.running = true
-            refreshTile()
-            setupVolumeKeys(cmdClient.status().volume)
-            audioManager.registerAudioDeviceCallback(deviceCallback, mainHandler)
-            Thread(::idleLoop, "mpd-idle").start()
-            refresh(cmdClient)
-            // "library" indexes the whole library once at start, "queue" only the queue
-            schedulePreload(full = config.artPreload == "library")
         } catch (e: MpdException) {
             toast(getString(R.string.toast_connect_failed, e.message ?: ""))
             refreshTile()
             stopNow("startup failed")
+            return
+        }
+
+        running = true
+        AppState.running = true
+        refreshTile()
+        audioManager.registerAudioDeviceCallback(deviceCallback, mainHandler)
+
+        // Idle starts before the first snapshot, so no change can slip in between
+        Thread(::idleLoop, "mpd-idle").start()
+
+        // The first sync runs on the command thread, so cmdClient is never used from two threads
+        command {
+            val volume = status().volume
+            mainHandler.post { setupVolumeKeys(volume) }
+            refresh(this)
+            // "library" indexes the whole library once at start, "queue" only the queue
+            schedulePreload(full = config.artPreload == "library")
         }
     }
 
@@ -205,54 +229,59 @@ class MprisService : Service() {
         return false
     }
 
+    /**
+     * Reads the current state and publishes it. Synchronized, so the idle loop and the command
+     * thread never publish out of order. The cover fetch happens inside the lock.
+     */
+    @Synchronized
     private fun refresh(client: MpdClient) {
-        val st = client.status()
-        val song = client.currentSong()
-        val dirKey = song?.file?.substringBeforeLast('/', "")
+        val snap = client.snapshot()
+        val song = snap.song
+        val file = song?.file
+        val dirKey = file?.substringBeforeLast('/', "")
         val sameArt = dirKey != null && dirKey == lastArtDir
+        val reuse = if (sameArt) lastArt else null
 
-        // Step 1: text appears immediately
-        mainHandler.post { applyState(st, song, if (sameArt) lastArt else null) }
+        // Step 1: text appears immediately, reusing the cover when the folder did not change
+        mainHandler.post { applyState(snap.status, song, reuse) }
 
-        // Step 2: cover follows if this folder has not been checked yet
-        if (!sameArt) {
-            val art = artFor(song?.file)
-            mainHandler.post { applyState(st, song, art) }
+        // Step 2: fetch the cover only for a new folder, and only when covers are enabled
+        if (config.albumArt && file != null && !sameArt) {
+            val art = artFor(file)
+            mainHandler.post { applyState(snap.status, song, art) }
         }
     }
 
-    /**
-     * Asks the preloader to fill the cache.
-     * full = whole library (also prunes removed folders), false = queue only.
-     */
+    /** Asks the preloader to fill the cache. full = whole library (also prunes), false = queue only. */
     private fun schedulePreload(full: Boolean) {
         val p = preloader ?: return
         command {
-            val files = send(if (full) "listall" else "playlistinfo")
-                .filter { it.first == "file" }
-                .map { it.second }
+            val files = listFiles(if (full) "listall" else "playlistinfo")
             if (full) p.submitLibrary(files) else p.submit(files)
         }
     }
 
-    private fun artFor(file: String?): Bitmap? {
+    private fun artFor(file: String): Bitmap? {
         val store = artStore ?: return null
-        if (!config.albumArt || file == null) return null
+        val cover = coverClient ?: return null
         val dirKey = file.substringBeforeLast('/', "")
         return try {
-            val bmp = store.thumbFor(dirKey) { MpdArt.fetch(config.mpd, file) }
+            val bmp = store.thumbFor(dirKey, file, cover)
             lastArtDir = dirKey
             lastArt = bmp
             bmp
         } catch (e: Exception) {
-            // Failed (for example MPD dropped). Do not mark the folder, retry on the next track.
+            // Failed, for example because MPD dropped. Do not mark the folder, retry on the next track.
             Log.w(TAG, "cover fetch failed, will retry: ${e.message}")
             lastArtDir = null
+            lastArt = null
             null
         }
     }
 
     private fun applyState(st: MpdStatus, song: MpdSong?, art: Bitmap?) {
+        if (!running) return
+
         playing = st.state == "play"
         mpdRepeat = st.repeat
         mpdSingle = st.single
@@ -261,9 +290,7 @@ class MprisService : Service() {
             ?: song?.file?.substringAfterLast('/')
                     ?: getString(R.string.default_title)
         nowArtist = song?.artist ?: ""
-
         val cover = art ?: placeholderArt
-        nowArt = cover
 
         // Sync from MPD only when no button press is still being sent
         if (st.volume >= 0 && pendingVol.get() == 0) {
@@ -271,11 +298,12 @@ class MprisService : Service() {
             volumeProvider?.setCurrentVolume(st.volume)
         }
 
-        // Session only exists while MPD is playing or paused.
-        // While stopped, KDE Connect and similar clients would show an empty player.
+        // The session only exists while MPD plays or pauses. A stopped session would show
+        // an empty player to KDE Connect and similar clients.
         val hasMedia = st.state != "stop"
         if (session.isActive != hasMedia) session.isActive = hasMedia
 
+        // Position changes constantly, so the playback state is sent on every update
         val state = when (st.state) {
             "play" -> PlaybackStateCompat.STATE_PLAYING
             "pause" -> PlaybackStateCompat.STATE_PAUSED
@@ -288,24 +316,38 @@ class MprisService : Service() {
                 .build()
         )
 
+        // Metadata only when something in it changed
         val duration = song?.duration ?: 0.0
-        val meta = MediaMetadataCompat.Builder()
-            .putString(MediaMetadataCompat.METADATA_KEY_TITLE, nowTitle)
-            .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, nowArtist)
-            .putString(MediaMetadataCompat.METADATA_KEY_ALBUM, song?.album ?: "")
-            .putLong(MediaMetadataCompat.METADATA_KEY_DURATION, (duration * 1000).toLong())
-        meta.putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, cover)
-        session.setMetadata(meta.build())
+        val metaKey = "$nowTitle|$nowArtist|${song?.album}|$duration"
+        if (metaKey != metaKeyShown || cover !== metaCoverShown) {
+            metaKeyShown = metaKey
+            metaCoverShown = cover
+            session.setMetadata(
+                MediaMetadataCompat.Builder()
+                    .putString(MediaMetadataCompat.METADATA_KEY_TITLE, nowTitle)
+                    .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, nowArtist)
+                    .putString(MediaMetadataCompat.METADATA_KEY_ALBUM, song?.album ?: "")
+                    .putLong(MediaMetadataCompat.METADATA_KEY_DURATION, (duration * 1000).toLong())
+                    .putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, cover)
+                    .build()
+            )
+        }
 
-        if (!running) return
-        if (hasMedia) {
-            showForeground(NOTIF_ID, buildNotification())
-        } else {
-            showForeground(NOTIF_IDLE_ID, buildIdleNotification())
+        // Notification only when something visible changed. Elapsed time is not shown there.
+        val notifKey = "${st.state}|$nowTitle|$nowArtist|${st.repeat}${st.single}${st.random}"
+        if (notifKey != notifKeyShown || cover !== notifCoverShown) {
+            notifKeyShown = notifKey
+            notifCoverShown = cover
+            nowArt = cover
+            if (hasMedia) {
+                showForeground(NOTIF_ID, buildNotification())
+            } else {
+                showForeground(NOTIF_IDLE_ID, buildIdleNotification())
+            }
         }
     }
 
-    /** Starts foreground only when the id changes. Otherwise just updates the notification. */
+    /** Starts foreground only when the id changes. Otherwise, just updates the notification. */
     private fun showForeground(id: Int, notif: Notification) {
         val nm = getSystemService(NotificationManager::class.java)
         if (foregroundId != id) {
@@ -319,7 +361,7 @@ class MprisService : Service() {
 
     private fun buildNotification(): Notification {
         val actions = buttons.map { buildAction(it) }
-        val compact = (0 until minOf(3, actions.size)).toList().toIntArray()
+        val compact = IntArray(minOf(3, actions.size)) { it }
 
         val builder = NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_mpd_art_placeholder)
@@ -331,7 +373,6 @@ class MprisService : Service() {
             .setCategory(NotificationCompat.CATEGORY_TRANSPORT)
 
         actions.forEach { builder.addAction(it) }
-
         builder.setStyle(
             androidx.media.app.NotificationCompat.MediaStyle()
                 .setMediaSession(session.sessionToken)
@@ -435,23 +476,26 @@ class MprisService : Service() {
         command { setOption("random", !status().random) }
     }
 
-    /** All commands to MPD go through one thread, so the client is never used concurrently. */
+    /** All commands to MPD go through one thread, so the command client is never used concurrently. */
     private fun command(block: MpdClient.() -> Unit) {
         if (!running) return
-        commands.execute {
-            // MPD closes idle connections, so reconnect when needed
-            try {
-                if (!cmdClient.isConnected) cmdClient.connect()
-                cmdClient.block()
-            } catch (e: MpdException) {
-                // The socket may have died mid-command. Try once more on a new connection.
+        try {
+            commands.execute {
                 try {
-                    cmdClient.connect()
+                    if (!cmdClient.isConnected) cmdClient.connect()
                     cmdClient.block()
-                } catch (e2: MpdException) {
-                    Log.w(TAG, "command failed: ${e2.message}")
+                } catch (e: MpdException) {
+                    // The socket may have died mid-command. Try once more on a new connection.
+                    try {
+                        cmdClient.connect()
+                        cmdClient.block()
+                    } catch (e2: MpdException) {
+                        Log.w(TAG, "command failed: ${e2.message}")
+                    }
                 }
             }
+        } catch (e: RejectedExecutionException) {
+            // Service is shutting down
         }
     }
 
@@ -546,6 +590,7 @@ class MprisService : Service() {
         if (::cmdClient.isInitialized) cmdClient.close()
         commands.shutdownNow()
         preloader?.stop()
+        coverClient?.close()
         session.isActive = false
         session.release()
         artStore?.close()
@@ -556,7 +601,9 @@ class MprisService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     private fun createChannel() {
-        if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.O) return
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+            return
+        }
         val nm = getSystemService(NotificationManager::class.java)
         nm.createNotificationChannel(
             NotificationChannel(CHANNEL_ID, getString(R.string.channel_playback), NotificationManager.IMPORTANCE_LOW)

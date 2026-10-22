@@ -2,12 +2,15 @@ package com.limaz.mpc
 
 import android.util.Log
 import java.util.concurrent.Executors
+import java.util.concurrent.RejectedExecutionException
 
 /**
  * Fills the art cache in the background, one folder at a time.
  * Folders already cached are skipped, so calling it repeatedly is safe.
+ *
+ * Uses the shared MpdArt instance, so it never opens its own socket.
  */
-class ArtPreloader(private val store: ArtStore, private val mpd: MpdConfig) {
+class ArtPreloader(private val store: ArtStore, private val cover: MpdArt) {
 
     companion object {
         private const val TAG = "ArtPreloader"
@@ -17,16 +20,16 @@ class ArtPreloader(private val store: ArtStore, private val mpd: MpdConfig) {
         Thread(r, "art-preload").apply { priority = Thread.MIN_PRIORITY }
     }
 
-    /** files: song paths. One per folder is enough. */
+    /** Queue mode. Files are song paths. One per folder is enough, duplicates are dropped. */
     fun submit(files: List<String>) {
-        executor.execute { run(files) }
+        enqueue { run(folderSamples(files)) }
     }
 
-    /** Library mode only. Prunes folders that are gone, then fills missing covers. */
+    /** Library mode. Prunes folders that are gone, then fills missing covers. */
     fun submitLibrary(files: List<String>) {
-        executor.execute {
+        enqueue {
             store.prune(files.map { it.substringBeforeLast('/', "") }.toSet())
-            run(files)
+            run(folderSamples(files))
         }
     }
 
@@ -34,17 +37,33 @@ class ArtPreloader(private val store: ArtStore, private val mpd: MpdConfig) {
         executor.shutdownNow()
     }
 
-    private fun run(files: List<String>) {
+    private fun enqueue(task: () -> Unit) {
+        try {
+            executor.execute(task)
+        } catch (e: RejectedExecutionException) {
+            // Preloader already stopped, nothing to do
+        }
+    }
+
+    /** One representative file per folder, in the order MPD returned them. */
+    private fun folderSamples(files: List<String>): List<Pair<String, String>> {
         val seen = HashSet<String>()
+        val out = ArrayList<Pair<String, String>>()
         for (file in files) {
-            if (Thread.interrupted()) return
             val dirKey = file.substringBeforeLast('/', "")
-            if (!seen.add(dirKey)) continue
+            if (seen.add(dirKey)) out.add(dirKey to file)
+        }
+        return out
+    }
+
+    private fun run(folders: List<Pair<String, String>>) {
+        for ((dirKey, file) in folders) {
+            if (Thread.interrupted()) return
             if (store.isCached(dirKey)) continue
             try {
-                store.ensure(dirKey) { MpdArt.fetch(mpd, file) }
+                store.ensure(dirKey, file, cover)
             } catch (e: Exception) {
-                // MPD dropped: stop this batch. The next run will try again.
+                // MPD dropped or refused: stop this batch. The next trigger will try again.
                 Log.w(TAG, "preload stopped: ${e.message}")
                 return
             }

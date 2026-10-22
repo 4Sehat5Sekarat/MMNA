@@ -12,11 +12,9 @@ import java.util.Locale
 class MpdException(message: String) : Exception(message)
 
 data class MpdStatus(
-    val state: String,      // play | pause | stop
-    val volume: Int,        // -1 if the server has no mixer
-    val songPos: Int?,
+    val state: String,   // play | pause | stop
+    val volume: Int,     // -1 if the server has no mixer
     val elapsed: Double,
-    val duration: Double,
     val repeat: Boolean,
     val single: Boolean,
     val random: Boolean
@@ -29,6 +27,13 @@ data class MpdSong(
     val album: String?,
     val duration: Double
 )
+
+/** status and currentsong, fetched in one round trip. song is null when nothing is loaded. */
+data class MpdSnapshot(val status: MpdStatus, val song: MpdSong?)
+
+/** Quotes a string for MPD. Shared by the command and cover clients. */
+fun mpdQuote(s: String): String =
+    "\"" + s.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
 
 /**
  * Minimal MPD client over a plain TCP socket (text protocol).
@@ -54,59 +59,47 @@ class MpdClient(
     @Throws(MpdException::class)
     fun connect() {
         close()
+        val s = Socket()
         try {
-            val s = Socket()
             s.connect(InetSocketAddress(host, port), timeoutMs)
             s.soTimeout = timeoutMs
             socket = s
             reader = BufferedReader(InputStreamReader(s.getInputStream(), Charsets.UTF_8))
             writer = BufferedWriter(OutputStreamWriter(s.getOutputStream(), Charsets.UTF_8))
-
-            val greeting = reader!!.readLine() ?: throw IOException("no greeting")
+            val greeting = reader?.readLine() ?: throw IOException("no greeting")
             if (!greeting.startsWith("OK MPD")) throw MpdException("not an MPD server")
-
-            if (password.isNotEmpty()) send("password ${quote(password)}")
+            if (password.isNotEmpty()) exec("password ${mpdQuote(password)}") {}
         } catch (e: MpdException) {
             close()
+            runCatching { s.close() }
             throw e
         } catch (e: Exception) {
             close()
+            runCatching { s.close() }
             throw MpdException("connect failed: ${e.message}")
         }
     }
 
     fun close() {
-        try {
-            socket?.close()
-        } catch (e: Exception) {
-            // Closing on purpose, errors can be ignored
-        }
+        runCatching { socket?.close() }
         socket = null
         reader = null
         writer = null
     }
 
-    /** Sends one command and returns the key/value pairs of the response. */
-    @Throws(MpdException::class)
-    fun send(cmd: String): List<Pair<String, String>> {
+    /** Sends one command. Calls onLine for every response line except OK. Throws on ACK. */
+    private inline fun exec(cmd: String, onLine: (String) -> Unit) {
         val r = reader ?: throw MpdException("not connected")
         val w = writer ?: throw MpdException("not connected")
         try {
             w.write(cmd)
             w.write("\n")
             w.flush()
-
-            val out = ArrayList<Pair<String, String>>()
             while (true) {
                 val line = r.readLine() ?: throw IOException("connection closed")
-                when {
-                    line == "OK" -> return out
-                    line.startsWith("ACK") -> throw MpdException(line)
-                    else -> {
-                        val i = line.indexOf(": ")
-                        if (i > 0) out.add(line.substring(0, i) to line.substring(i + 2))
-                    }
-                }
+                if (line == "OK") return
+                if (line.startsWith("ACK")) throw MpdException(line)
+                onLine(line)
             }
         } catch (e: MpdException) {
             throw e
@@ -116,77 +109,118 @@ class MpdClient(
         }
     }
 
+    /** status and currentsong in one command list. One round trip instead of two. */
+    @Throws(MpdException::class)
+    fun snapshot(): MpdSnapshot {
+        val r = reader ?: throw MpdException("not connected")
+        val w = writer ?: throw MpdException("not connected")
+        val groups = ArrayList<Map<String, String>>(2)
+        try {
+            w.write("command_list_ok_begin\nstatus\ncurrentsong\ncommand_list_end\n")
+            w.flush()
+            var cur = HashMap<String, String>()
+            while (true) {
+                val line = r.readLine() ?: throw IOException("connection closed")
+                when {
+                    line == "list_OK" -> {
+                        groups.add(cur)
+                        cur = HashMap()
+                    }
+                    line == "OK" -> break
+                    line.startsWith("ACK") -> throw MpdException(line)
+                    else -> {
+                        val i = line.indexOf(": ")
+                        if (i > 0) cur[line.substring(0, i)] = line.substring(i + 2)
+                    }
+                }
+            }
+        } catch (e: MpdException) {
+            throw e
+        } catch (e: Exception) {
+            close()
+            throw MpdException("I/O error: ${e.message}")
+        }
+        if (groups.size != 2) throw MpdException("unexpected snapshot response")
+        val song = groups[1]
+        return MpdSnapshot(parseStatus(groups[0]), if (song.isEmpty()) null else parseSong(song))
+    }
+
+    @Throws(MpdException::class)
+    fun status(): MpdStatus = parseStatus(fields("status"))
+
+    /** Only the "file:" values of a listing. No pairs are built for the other tags. */
+    @Throws(MpdException::class)
+    fun listFiles(cmd: String): List<String> {
+        val out = ArrayList<String>()
+        exec(cmd) { line -> if (line.startsWith("file: ")) out.add(line.substring(6)) }
+        return out
+    }
+
     /** Blocks until MPD reports a change. No polling. */
     @Throws(MpdException::class)
     fun idle(): Set<String> {
         val s = socket ?: throw MpdException("not connected")
+        val changed = HashSet<String>()
         s.soTimeout = 0
         try {
-            return send("idle").filter { it.first == "changed" }.map { it.second }.toSet()
+            exec("idle") { line -> if (line.startsWith("changed: ")) changed.add(line.substring(9)) }
         } finally {
             if (isConnected) s.soTimeout = timeoutMs
         }
+        return changed
     }
 
     @Throws(MpdException::class)
-    fun play() { send("play") }
+    fun play() { exec("play") {} }
 
     @Throws(MpdException::class)
-    fun pause(on: Boolean) { send("pause ${if (on) 1 else 0}") }
+    fun pause(on: Boolean) { exec("pause ${if (on) 1 else 0}") {} }
 
     @Throws(MpdException::class)
-    fun stop() { send("stop") }
+    fun stop() { exec("stop") {} }
 
     @Throws(MpdException::class)
-    fun next() { send("next") }
+    fun next() { exec("next") {} }
 
     @Throws(MpdException::class)
-    fun previous() { send("previous") }
+    fun previous() { exec("previous") {} }
 
     @Throws(MpdException::class)
     fun seekCur(seconds: Double) {
-        send("seekcur ${String.format(Locale.US, "%.3f", seconds)}")
+        exec("seekcur ${String.format(Locale.US, "%.3f", seconds)}") {}
     }
 
     @Throws(MpdException::class)
-    fun setVolume(v: Int) {
-        send("setvol $v")
-    }
+    fun setVolume(v: Int) { exec("setvol $v") {} }
 
     /** name: "repeat", "single", or "random" */
     @Throws(MpdException::class)
-    fun setOption(name: String, on: Boolean) {
-        send("$name ${if (on) 1 else 0}")
-    }
+    fun setOption(name: String, on: Boolean) { exec("$name ${if (on) 1 else 0}") {} }
 
     @Throws(MpdException::class)
-    fun status(): MpdStatus {
-        val m = send("status").toMap()
-        return MpdStatus(
-            state = m["state"] ?: "stop",
-            volume = m["volume"]?.toIntOrNull() ?: -1,
-            songPos = m["song"]?.toIntOrNull(),
-            elapsed = m["elapsed"]?.toDoubleOrNull() ?: 0.0,
-            duration = m["duration"]?.toDoubleOrNull() ?: 0.0,
-            repeat = m["repeat"] == "1",
-            single = m["single"] == "1",
-            random = m["random"] == "1"
-        )
+    private fun fields(cmd: String): Map<String, String> {
+        val m = HashMap<String, String>()
+        exec(cmd) { line ->
+            val i = line.indexOf(": ")
+            if (i > 0) m[line.substring(0, i)] = line.substring(i + 2)
+        }
+        return m
     }
 
-    @Throws(MpdException::class)
-    fun currentSong(): MpdSong? {
-        val m = send("currentsong").toMap()
-        if (m.isEmpty()) return null
-        return MpdSong(
-            file = m["file"],
-            title = m["Title"],
-            artist = m["Artist"],
-            album = m["Album"],
-            duration = (m["duration"] ?: m["Time"])?.toDoubleOrNull() ?: 0.0
-        )
-    }
+    private fun parseStatus(m: Map<String, String>): MpdStatus = MpdStatus(
+        state = m["state"] ?: "stop",
+        volume = m["volume"]?.toIntOrNull() ?: -1,
+        elapsed = m["elapsed"]?.toDoubleOrNull() ?: 0.0,
+        repeat = m["repeat"] == "1",
+        single = m["single"] == "1",
+        random = m["random"] == "1"
+    )
 
-    private fun quote(s: String): String =
-        "\"" + s.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
+    private fun parseSong(m: Map<String, String>): MpdSong = MpdSong(
+        file = m["file"],
+        title = m["Title"],
+        artist = m["Artist"],
+        album = m["Album"],
+        duration = (m["duration"] ?: m["Time"])?.toDoubleOrNull() ?: 0.0
+    )
 }
