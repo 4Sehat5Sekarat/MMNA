@@ -76,7 +76,6 @@ class MprisService : Service() {
     private var mpdSingle = false
     private var mpdRandom = false
     private var volumeProvider: VolumeProviderCompat? = null
-    @Volatile private var shadowVolume = -1
     private val pendingVol = AtomicInteger(0)
 
     // Cover state. Only touched inside refresh(), which is synchronized.
@@ -222,7 +221,7 @@ class MprisService : Service() {
                 idleClient.connect()
                 refresh(idleClient)
                 return true
-            } catch (e: Exception) {
+            } catch (_: Exception) {
                 Thread.sleep(config.reconnectDelayMs)
             }
         }
@@ -293,10 +292,7 @@ class MprisService : Service() {
         val cover = art ?: placeholderArt
 
         // Sync from MPD only when no button press is still being sent
-        if (st.volume >= 0 && pendingVol.get() == 0) {
-            shadowVolume = st.volume
-            volumeProvider?.setCurrentVolume(st.volume)
-        }
+        if (st.volume >= 0 && pendingVol.get() == 0) volumeProvider?.setCurrentVolume(toLevel(st.volume))
 
         // The session only exists while MPD plays or pauses. A stopped session would show
         // an empty player to KDE Connect and similar clients.
@@ -515,50 +511,49 @@ class MprisService : Service() {
         override fun onPlay() = command { play() }
         override fun onPause() = command { pause(true) }
         override fun onSkipToNext() = command { next() }
-        override fun onSkipToPrevious() = command { previous() }
+        override fun onSkipToPrevious() = command {
+            val st = status()
+            if (st.elapsed > 10.0) seekCur(0.0) else previous()
+        }
         override fun onStop() = command { stop() }
         override fun onSeekTo(pos: Long) = command { seekCur(pos / 1000.0) }
     }
 
     /** Volume keys and volume slider go to MPD. Only set up when volume_keys = "mpd". */
+    private val volumeLevels: Int
+        get() = (100 + config.volumeStep - 1) / config.volumeStep
+
     private fun setupVolumeKeys(initialVolume: Int) {
         if (config.volumeKeys != "mpd") return
         if (initialVolume < 0) {
             toast(getString(R.string.toast_no_mixer))
             return
         }
-        shadowVolume = initialVolume
-
         val vp = object : VolumeProviderCompat(
-            VolumeProviderCompat.VOLUME_CONTROL_ABSOLUTE, 100, initialVolume
+            VolumeProviderCompat.VOLUME_CONTROL_ABSOLUTE, volumeLevels, toLevel(initialVolume)
         ) {
-            // Slider: Android sends the target value directly
-            override fun onSetVolumeTo(volume: Int) {
-                applyVolume(volume.coerceIn(0, 100), this)
-            }
-
-            // Volume keys: Android sends a direction, computed from the shadow value
+            override fun onSetVolumeTo(level: Int) = applyLevel(level, this)
             override fun onAdjustVolume(direction: Int) {
-                if (direction == 0 || shadowVolume < 0) return
-                applyVolume((shadowVolume + direction * config.volumeStep).coerceIn(0, 100), this)
+                if (direction != 0) applyLevel(currentVolume + direction, this)
             }
         }
         volumeProvider = vp
         session.setPlaybackToRemote(vp)
     }
 
-    private fun applyVolume(target: Int, vp: VolumeProviderCompat) {
-        shadowVolume = target
-        vp.setCurrentVolume(target) // OSD updates now, without waiting for MPD
+    private fun applyLevel(level: Int, vp: VolumeProviderCompat) {
+        if (!running) return
+        val l = level.coerceIn(0, volumeLevels)
+        vp.setCurrentVolume(l)
         pendingVol.incrementAndGet()
         command {
-            try {
-                setVolume(target)
-            } finally {
-                pendingVol.decrementAndGet()
-            }
+            try { setVolume(minOf(l * config.volumeStep, 100)) }
+            finally { pendingVol.decrementAndGet() }
         }
     }
+
+    private fun toLevel(volume: Int): Int =
+        if (volume >= 100) volumeLevels else Math.round(volume / config.volumeStep.toFloat())
 
     private val deviceCallback = object : AudioDeviceCallback() {
         override fun onAudioDevicesRemoved(removedDevices: Array<out AudioDeviceInfo>) {
