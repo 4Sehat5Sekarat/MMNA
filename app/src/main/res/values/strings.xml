@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">MPD MPRIS</string>
+    <string name="root_title">MPD Config</string>
+
+    <string name="channel_playback">Playback</string>
+    <string name="default_title">MPD</string>
+
+    <string name="action_previous">Previous</string>
+    <string name="action_next">Next</string>
+    <string name="action_play">Play</string>
+    <string name="action_pause">Pause</string>
+    <string name="action_stop">Stop</string>
+    <string name="action_repeat">Repeat: %1$s</string>
+    <string name="action_shuffle_on">Shuffle: on</string>
+    <string name="action_shuffle_off">Shuffle: off</string>
+    <string name="repeat_off">off</string>
+    <string name="repeat_all">all</string>
+    <string name="repeat_one">one</string>
+
+    <string name="toast_connect_failed">Failed to connect to MPD: %1$s</string>
+    <string name="toast_mpd_timeout">MPD is not responding, stopping app</string>
+    <string name="toast_no_mixer">MPD has no mixer, volume_keys ignored</string>
+
+    <string name="settings_app_running">Turn the tile off before editing the config</string>
+    <string name="settings_config_created">Config created. Open the MPD Config folder in your file manager</string>
+    <string name="settings_config_ready">Edit the config in the MPD Config folder of your file manager</string>
+    <string name="settings_config_error">Config error: %1$s</string>
+
+    <string name="err_config_read">Cannot read config file</string>
+    <string name="err_config_syntax">Config syntax error: %1$s</string>
+    <string name="err_host_empty">mpd.host cannot be empty</string>
+    <string name="err_port_range">mpd.port must be 1-65535</string>
+    <string name="err_timeout">mpd.timeout_ms must be greater than 0</string>
+    <string name="err_idle_timeout">idle_timeout_sec must be greater than 0</string>
+    <string name="err_reconnect_delay">reconnect_delay_ms must be at least 500</string>
+    <string name="err_art_size">art_max_size must be 64-1024</string>
+    <string name="err_art_preload">art_preload must be off, queue, or library</string>
+    <string name="err_event_unknown">Unknown event: %1$s</string>
+    <string name="err_action_unknown">Unknown action: %1$s</string>
+    <string name="err_buttons_max">notification_buttons allows at most 5 buttons</string>
+    <string name="err_buttons_duplicate">notification_buttons cannot contain duplicates</string>
+    <string name="err_button_unknown">Unknown button: %1$s</string>
+    <string name="err_volume_keys">volume_keys must be system or mpd</string>
+    <string name="err_volume_step">volume_step must be 1-50</string>
+    <string name="channel_idle">Idle</string>
+    <string name="idle_text">Waiting for MPD playback</string>
+</resources>

@@ -1,0 +1,20 @@
+{
+  "mpd": {
+    "host": "127.0.0.1",
+    "port": 6600,
+    "password": "",
+    "timeout_ms": 5000
+  },
+  "idle_timeout_sec": 60,
+  "reconnect_delay_ms": 2000,
+  "album_art": true,
+  "art_max_size": 256,
+  "art_preload": "queue",
+  "events": {
+    "wired_disconnect": "pause",
+    "bt_disconnect": "pause"
+  },
+  "notification_buttons": ["prev", "play", "next"],
+  "volume_keys": "system",
+  "volume_step": 5
+}
