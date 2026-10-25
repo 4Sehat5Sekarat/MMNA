@@ -1,4 +1,4 @@
-package com.limaz.mpc
+package com.limaz.mmna
 
 import android.content.ContentValues
 import android.content.Context
@@ -22,7 +22,7 @@ import java.util.concurrent.ConcurrentHashMap
 class ArtStore(context: Context, private val maxSize: Int) :
     SQLiteOpenHelper(context, "art.db", null, 1) {
 
-    private val dir = File(context.filesDir, "art").apply { mkdirs() }
+    private val dir = File(context.cacheDir, "art").apply { mkdirs() }
 
     /** dirKey -> hash ("" = no cover). Filled from the database on first use. */
     private val known = ConcurrentHashMap<String, String>()

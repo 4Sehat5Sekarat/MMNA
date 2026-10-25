@@ -16,7 +16,7 @@
 
         <provider
             android:name=".ConfigDocumentsProvider"
-            android:authorities="com.limaz.mpc.documents"
+            android:authorities="com.limaz.mmna.documents"
             android:exported="true"
             android:grantUriPermissions="true"
             android:permission="android.permission.MANAGE_DOCUMENTS">

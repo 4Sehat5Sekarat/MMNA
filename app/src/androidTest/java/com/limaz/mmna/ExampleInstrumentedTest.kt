@@ -1,4 +1,4 @@
-package com.limaz.mpc
+package com.limaz.mmna
 
 import androidx.test.platform.app.InstrumentationRegistry
 import androidx.test.ext.junit.runners.AndroidJUnit4

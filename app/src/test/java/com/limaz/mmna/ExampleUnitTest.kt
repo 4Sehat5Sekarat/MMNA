@@ -1,4 +1,4 @@
-package com.limaz.mpc
+package com.limaz.mmna
 
 import org.junit.Test
 

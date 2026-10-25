@@ -1,4 +1,4 @@
-package com.limaz.mpc
+package com.limaz.mmna
 
 import android.app.Activity
 import android.os.Bundle

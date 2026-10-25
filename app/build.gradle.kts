@@ -4,11 +4,11 @@ plugins {
 }
 
 android {
-    namespace = "com.limaz.mpc"
+    namespace = "com.limaz.mmna"
     compileSdk = 34
 
     defaultConfig {
-        applicationId = "com.limaz.mpc"
+        applicationId = "com.limaz.mmna"
         minSdk = 24
         targetSdk = 34
         versionCode = 1

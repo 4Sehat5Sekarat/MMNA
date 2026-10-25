@@ -1,4 +1,4 @@
-package com.limaz.mpc
+package com.limaz.mmna
 
 import android.database.Cursor
 import android.database.MatrixCursor
