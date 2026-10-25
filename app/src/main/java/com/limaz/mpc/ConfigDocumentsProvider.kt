@@ -47,7 +47,7 @@ class ConfigDocumentsProvider : DocumentsProvider() {
             result.newRow()
                 .add(Root.COLUMN_ROOT_ID, rootId)
                 .add(Root.COLUMN_FLAGS, Root.FLAG_LOCAL_ONLY or Root.FLAG_SUPPORTS_CREATE)
-                .add(Root.COLUMN_ICON, R.mipmap.ic_launcher)
+                .add(Root.COLUMN_ICON, R.drawable.ic_mpd_art_placeholder)
                 .add(Root.COLUMN_TITLE, rootTitle)
                 .add(Root.COLUMN_DOCUMENT_ID, rootId)
         }

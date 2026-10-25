@@ -418,7 +418,7 @@ class MprisService : Service() {
             servicePending(ACTION_REPEAT, 1)
         )
         "random" -> NotificationCompat.Action(
-            R.drawable.ic_media_random,
+            if (mpdRandom) R.drawable.ic_media_random else R.drawable.ic_media_unrandom,
             getString(if (mpdRandom) R.string.action_shuffle_on else R.string.action_shuffle_off),
             servicePending(ACTION_RANDOM, 2)
         )
