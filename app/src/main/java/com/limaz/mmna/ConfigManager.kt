@@ -24,6 +24,7 @@ data class AppConfig(
     val reconnectDelayMs: Long,
     val albumArt: Boolean,
     val artMaxSize: Int,
+    val artSquare: Boolean,
     val artPreload: String,
     val events: Map<String, String>,
     val notificationButtons: List<String>,
@@ -100,6 +101,8 @@ object ConfigManager {
         val artMax = root.optInt("art_max_size", 256)
         if (artMax !in 64..1024) throw ConfigException(R.string.err_art_size)
 
+        val artSquare = root.optBoolean("art_square", true)
+
         val artPreload = root.optString("art_preload", "queue")
         if (artPreload !in allowedPreload) throw ConfigException(R.string.err_art_preload)
 
@@ -138,6 +141,7 @@ object ConfigManager {
             reconnectDelayMs = reconnectDelay,
             albumArt = albumArt,
             artMaxSize = artMax,
+            artSquare = artSquare,
             artPreload = artPreload,
             events = events,
             notificationButtons = buttons,

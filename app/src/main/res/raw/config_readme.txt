@@ -20,7 +20,7 @@ SETTINGS
   idle_timeout_sec      Seconds to keep retrying a lost MPD connection before the app stops. Default: 60
   reconnect_delay_ms    Delay between reconnect attempts, minimum 500. Default: 2000
   album_art             true or false. Show album art in the notification. Default: true
-  art_max_size          Longest side of the cover in px, 64-1024. Smaller is faster. Default: 256
+  art_square            true or false. Crop covers to a centered square. Default: true art_max_size Longest side of the cover in px, 64-1024. Smaller is faster. Default: 256
   art_preload           off, queue, or library. See PRELOAD. Default: queue
   events                Action for each event. See EVENTS.
   notification_buttons  Buttons in the notification, in order, maximum 5. Default: ["prev", "play", "next"]

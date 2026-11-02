@@ -147,7 +147,7 @@ class MprisService : Service() {
     }
 
     private fun startUp() {
-        val store = ArtStore(this, config.artMaxSize)
+        val store = ArtStore(this, config.artMaxSize, config.artSquare)
         artStore = store
         val cover = MpdArt(config.mpd)
         coverClient = cover

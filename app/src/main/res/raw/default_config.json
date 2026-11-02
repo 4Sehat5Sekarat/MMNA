@@ -9,12 +9,17 @@
   "reconnect_delay_ms": 2000,
   "album_art": true,
   "art_max_size": 256,
+  "art_square": false,
   "art_preload": "queue",
   "events": {
     "wired_disconnect": "pause",
     "bt_disconnect": "pause"
   },
-  "notification_buttons": ["prev", "play", "next"],
+  "notification_buttons": [
+    "prev",
+    "play",
+    "next"
+  ],
   "volume_keys": "system",
   "volume_step": 5
 }

@@ -19,7 +19,7 @@ import java.util.concurrent.ConcurrentHashMap
  *
  * Thread-safe. Lookups can run from any thread, writes are serialized by SQLite.
  */
-class ArtStore(context: Context, private val maxSize: Int) :
+class ArtStore(context: Context, private val maxSize: Int, private val square: Boolean) :
     SQLiteOpenHelper(context, "art.db", null, 1) {
 
     private val dir = File(context.cacheDir, "art").apply { mkdirs() }
@@ -67,7 +67,7 @@ class ArtStore(context: Context, private val maxSize: Int) :
 
     /** Scales down, compresses to JPEG, stores under the hash. Returns the hash, or null on failure. */
     private fun saveThumb(raw: ByteArray): String? {
-        val bmp = decodeScaled(raw) ?: return null
+        val bmp = decodeScaled(raw)?.let { if (square) centerSquare(it) else it } ?: return null
         val out = ByteArrayOutputStream()
         bmp.compress(Bitmap.CompressFormat.JPEG, 85, out)
         bmp.recycle()
@@ -91,6 +91,15 @@ class ArtStore(context: Context, private val maxSize: Int) :
         return BitmapFactory.decodeByteArray(
             raw, 0, raw.size, BitmapFactory.Options().apply { inSampleSize = sample }
         )
+    }
+
+    /** Crops the largest centered square. Returns the same bitmap if it is already square. */
+    private fun centerSquare(src: Bitmap): Bitmap {
+        if (src.width == src.height) return src
+        val side = minOf(src.width, src.height)
+        val out = Bitmap.createBitmap(src, (src.width - side) / 2, (src.height - side) / 2, side, side)
+        src.recycle()
+        return out
     }
 
     private fun sha256(bytes: ByteArray): String =
